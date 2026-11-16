@@ -1,123 +1,186 @@
-# Multi-Tenant Helpdesk SaaS — Problem, Solution, and the Role of Cloud Computing
+# Helpdesk SaaS — Cloud-Native Multi-Tenant Application
 
 **Author:** Mustafa Saad Fadil
-**Date:** 2026-09-21
+**Course:** Cloud Computing: Fundamentos e Infraestructuras — Prácticas
+**Milestone:** Hito 1 — Definición del Proyecto, Modelo de Negocio y Arquitectura
 
 ---
 
-## 1. The Problem
+## 1. Domain Description
 
-Multi-tenant Software-as-a-Service (SaaS) platforms share one application and
-infrastructure across many customers (**tenants**) to achieve cost efficiency and
-elasticity. This sharing — NIST's _Resource Pooling_ characteristic — creates a
-fundamental tension with **isolation**:
+The project is a **multi-tenant Helpdesk SaaS**: a cloud-native application that
+lets many customer companies (**tenants**) manage their own support tickets within
+one shared platform.
 
-- Each tenant's data must be protected from leakage into another tenant's data.
-- One heavy tenant must not degrade the performance of others (the
-  **"noisy neighbor"** problem).
+**Business problem:** small and medium companies need professional support-desk
+tooling but cannot each afford dedicated infrastructure. A shared SaaS lowers
+cost through resource pooling, while each tenant's data must stay isolated from
+the others.
 
-No single isolation model (**Pool** / **Bridge** / **Silo**) is optimal for all
-workloads; each imposes a different trade-off between isolation strength and
-cost efficiency. There is no systematic, measurable guidance on **when** each
-model — or a hybrid of them — is the right choice, and what its effect is on
-performance and cost.
+**Main use cases:**
+- An agent logs, updates and closes support tickets for their own tenant.
+- A tenant administrator configures their tenant and manages its agents.
+- A tenant only ever sees its own data (isolation).
+- The platform operator meters per-tenant usage for billing.
+
+This deliberately avoids a trivial CRUD system: the core value is the **secure
+isolation of many tenants on shared infrastructure**, and the empirical study of
+that trade-off.
 
 ---
 
-## 2. The Proposed Solution
+## 2. Problem & Proposed Solution
 
-A containerised **Helpdesk SaaS** built as **microservices**, used as a testbed to
-compare two isolation models under controlled multi-tenant load:
+**Problem.** Multi-tenancy creates a tension between *resource pooling* (cost
+efficiency) and *isolation* (security and performance). No single isolation model
+— **Pool** (shared schema + `tenant_id` filter) or **Bridge** (schema per tenant)
+— is optimal for every workload; each trades isolation strength against cost.
 
-- **Pool model:** one shared schema; isolation enforced by a `tenant_id` filter on
-  every query (enforced at the database with Row-Level Security).
-- **Bridge model:** one database, a separate schema per tenant; isolation enforced
-  structurally by the schema boundary.
+**Solution.** A containerised microservices Helpdesk SaaS used as a testbed to
+compare Pool and Bridge under controlled multi-tenant load, producing
+evidence-based, conditional guidance on when each model (or a hybrid) is right.
 
-The system comprises services behind an **API Gateway** (Auth, Tenants, Tickets,
-Notifications, Billing). Tenant identity is carried in a **signed JWT** and
-propagated via request context, so identity never depends on user-controllable
-request data.
+**Why it is legitimate.**
+- It addresses a real, unsolved engineering trade-off (isolation vs. cost).
+- It fills a gap: conditional, *measured* guidance rather than assertion.
+- It is grounded in NIST (SP 800-145) and reproducible (version-controlled,
+  synthetic data).
+- Scope is honestly bounded (Silo and multi-region are out of scope).
+
+---
+
+## 3. NIST SP 800-145 — The 5 Essential Characteristics
+
+Reference: NIST SP 800-145, *The NIST Definition of Cloud Computing*. Verify
+against the official document before citing.
+
+| Characteristic | How this application realises it |
+|----------------|----------------------------------|
+| **On-demand self-service** | Tenants and test environments provisioned programmatically, no manual setup. |
+| **Broad network access** | Services reachable over HTTPS from any tenant client. |
+| **Resource pooling** | Shared infrastructure is exactly what makes the Pool model and its cost efficiency possible. |
+| **Rapid elasticity** | Auto-scaling absorbs spikes (e.g., a heavy tenant) without over-provisioning. |
+| **Measured service** | Per-tenant usage metering and monitoring let us *measure* the trade-off, not guess it. |
+
+> Note: *isolation* is not one of the five NIST characteristics; it is a security /
+> non-functional requirement. This distinction is deliberate.
+
+---
+
+## 4. NIST SP 500-292 — Actor Mapping
+
+Reference: NIST SP 500-292, *NIST Cloud Computing Reference Architecture*. Verify
+against the official source; confirm the exact actor labels with the course brief.
+
+| Actor | Role in this project |
+|-------|----------------------|
+| **Consumer** | The tenant companies and their agents using the Helpdesk SaaS. |
+| **Provider** | The cloud platform delivering compute, database and the SaaS. |
+| **Intermediary** | Managed services (managed DB, monitoring, message broker) adding value over raw infrastructure. |
+| **Auditor** | Security/compliance review verifying tenant isolation; isolation tests serve as audit evidence. |
+| **Carrier / Operator** | The network path (HTTPS) carrying data between clients and services. |
+
+### Economic impact
+- **Consumer:** converts fixed IT cost into pay-per-use operating cost, scaling
+  with actual usage.
+- **Provider:** benefits from resource pooling and economies of scale.
+- **Intermediary:** value-added services reduce operational burden and cost.
+- **Auditor:** auditable isolation evidence lowers compliance cost.
+
+---
+
+## 5. Architecture
+
+Six microservices behind an API Gateway. Tenant identity is carried in a signed
+JWT and propagated via request context; the database enforces isolation.
 
 ```mermaid
 flowchart TD
     Client["Client Apps<br/>Tenant A / B / C"]
     GW["API Gateway<br/>JWT verify · tenant_id inject · rate limit"]
+
     Client -->|HTTPS + JWT| GW
-    GW --> AUTH["Auth"]
-    GW --> TEN["Tenants"]
+
+    GW --> AUTH["Auth / Identity"]
+    GW --> TEN["Tenants<br/>mgmt & config"]
     GW --> TIX["Tickets (CORE)"]
     GW --> NOTIF["Notifications"]
-    GW --> BILL["Billing"]
+    GW --> BILL["Billing<br/>usage metering"]
+
+    NOTIF -. async .-> MQ[["Message Broker<br/>tenant_id tagged"]]
+    GW --> MON["Monitoring / Logging"]
+
     AUTH --> DB[("Data Layer<br/>tenant_id isolation")]
     TEN --> DB
     TIX --> DB
     BILL --> DB
+    MQ --> NOTIF
 ```
 
-We then measure latency (p50/p95/p99), throughput, error rate, and resource use
-across two scenarios — homogeneous load and skewed (noisy-neighbor) load — to
-produce empirical guidance on the trade-off.
+**Communication protocols:** client↔gateway over HTTPS/REST; gateway↔services
+over internal HTTP/REST; notifications↔broker over asynchronous messaging.
+
+**Persistence:** each service owns its datastore (database-per-service).
+Isolation enforced by Row-Level Security (Pool) or per-tenant schema (Bridge).
 
 ---
 
-## 3. Why This Is Legitimate (Justification)
+## 6. REST API (main endpoints)
 
-**3.1 It addresses a real, unsolved tension.** The isolation-vs-cost trade-off is
-a genuine engineering dilemma, not an artificial one. Real platforms (support
-desks, CRM, analytics) face it in production.
+Base path: `/api/v1` · Auth: `Authorization: Bearer <JWT>` · `tenant_id` derived
+from the JWT, never from the request body.
 
-**3.2 It fills an identifiable gap.** Rather than asserting a "best" model, the
-project produces _conditional, evidence-based guidance_ (if the tenant
-distribution is a long tail → hybrid; if homogeneous small tenants → Pool; if
-few large tenants needing strict isolation → Bridge).
+| Method | Endpoint | Description | Request body | Response |
+|--------|----------|-------------|--------------|----------|
+| POST | `/auth/login` | Authenticate, issue JWT | `{ "email": "...", "password": "..." }` | `{ "token": "...", "tenant_id": "A" }` |
+| POST | `/tickets` | Create a ticket | `{ "subject": "...", "description": "..." }` | `201` `{ "id": 1, "tenant_id": "A" }` |
+| GET | `/tickets` | List tenant's tickets | — | `200` `[ { "id": 1 } ]` |
+| GET | `/tickets/{id}` | Get one ticket | — | `200` `{ ... }` / `404` if not owner |
+| PATCH | `/tickets/{id}` | Update a ticket | `{ "status": "closed" }` | `200` `{ ... }` |
+| POST | `/tenants` | Register a tenant (provider) | `{ "name": "..." }` | `201` `{ "id": "B" }` |
 
-**3.3 It is grounded in an established reference.** The design is mapped to the
-five NIST essential characteristics (SP 800-145), and the study correctly
-distinguishes _isolation_ (a security / non-functional requirement) from the NIST
-characteristics themselves.
-
-**3.4 It is testable and reproducible.** The research questions translate into
-measurable variables, repeatable test runs, and version-controlled artefacts
-(IR, load scripts, ADRs). Findings can be independently reproduced.
-
-**3.5 Scope is honestly bounded.** Silo and full multi-region deployment are
-explicitly out of scope and acknowledged as limitations — a sign of methodological
-awareness, not weakness.
+Cross-tenant access returns `404` (not `403`) to avoid leaking resource existence.
 
 ---
 
-## 4. How Cloud Computing Makes It Better
+## 7. Repository Structure
 
-Cloud computing is not merely the deployment target — specific cloud
-characteristics directly improve the solution and are realised and measured in it.
-
-| NIST characteristic        | How it improves this project                                                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| **On-demand self-service** | Tenants and test environments are provisioned programmatically, no manual setup.                                              |
-| **Broad network access**   | Services are reachable over HTTPS from any client, enabling the multi-tenant clients.                                         |
-| **Resource pooling**       | Shared infrastructure is exactly what makes the Pool model and its cost efficiency possible.                                  |
-| **Rapid elasticity**       | Auto-scaling absorbs load spikes (e.g., the heavy tenant in Scenario B) without over-provisioning.                            |
-| **Measured service**       | Built-in metering/monitoring quantifies per-tenant usage — this is what lets us _measure_ the trade-off rather than guess it. |
-
-Beyond the characteristics, cloud computing improves the project by:
-
-- **Cost efficiency:** pay-per-use means the testbed costs little and the cost
-  comparison between models is directly observable.
-- **Reproducible infrastructure:** Infrastructure-as-Code (Docker, Kubernetes)
-  makes the test environment identical across runs and repeatable by others.
-- **Elasticity under load:** the noisy-neighbor scenario can be reproduced
-  realistically because the platform can scale resources on demand.
-- **Managed services:** managed databases and monitoring reduce operational
-  overhead, letting the project focus on the isolation question itself.
+    docs/          architecture, ADRs, NIST mapping
+    services/      one folder per microservice
+    libs/          shared code (tenant-context, auth middleware)
+    infrastructure/ Docker, Kubernetes, database (RLS / migrations)
+    tests/         load tests + tenant-isolation tests
+    .github/       CI/CD workflows, issue & PR templates
 
 ---
 
-## 5. Research Questions (for reference)
+## 8. Engineering Environment (GitHub)
+
+- **Branch strategy:** `main` (protected) + `feature/<name>` merged via Pull
+  Requests with mandatory review and passing CI.
+- **Semantic commits:** `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
+  Format: `<type>(<scope>): <summary>`.
+- **Project board:** GitHub Projects grouped by Milestone with the initial backlog.
+- **User stories:** recorded as Issues using `.github/ISSUE_TEMPLATE/user_story.md`.
+- **CI:** build → lint → unit tests → **isolation tests** → docker build.
+
+---
+
+## 9. Research Questions
 
 - **RQ1:** Trade-off between isolation and cost-efficiency between Pool and Bridge.
 - **RQ2:** Effect of the isolation model on latency under multi-tenant load.
-- **RQ3:** How tenant context is propagated across services without cross-tenant
-  leakage.
+- **RQ3:** Secure tenant-context propagation without cross-tenant leakage.
 
 ---
+
+## 10. Getting Started
+
+    docker compose up --build
+
+---
+
+## Academic note
+
+This is a master's coursework project. Design decisions are tracked in
+
